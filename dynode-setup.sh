@@ -6,11 +6,13 @@ NC='\033[0m'
 
 PROJECT="Dynode"
 PROJECT_FOLDER="/root/dynamic"
-
+GITHUB_REPO="https://github.com/duality-solutions/dynamic.git"
 DAEMON_BINARY="dynamicd"
 
 DAEMON_BINARY_PATH="/root/dynamic/src/dynamicd"
 CLI_BINARY="/root/dynamic/src/dynamic-cli"
+DYNODE_STATUS_COMMAND="dnsync status"
+NODE_INFO_COMMAND="getinfo"
 
 CONF_FOLDER="/root/.dynamic"
 CONF_FILE="${CONF_FOLDER}/dynamic.conf"
@@ -20,8 +22,6 @@ RPC_PORT="33301"
 
 DAEMON_START="/root/dynamic/src/dynamicd -daemon"
 CRONTAB_LINE="@reboot $DAEMON_START"
-
-GITHUB_REPO="https://github.com/duality-solutions/dynamic.git"
 
 DISTO_VERSION=0.0
 DISTO_NAME=$(lsb_release --id | cut -f2)
@@ -34,10 +34,10 @@ function get_shared_key()
 
 function get_branch()
 {
-  echo -e "Enter the ${RED}repo branch name ${NC}:"
+  echo -e "Enter the ${RED}Github Repo Branch Name ${NC}:"
   read -e GITHUB_BRANCH
-  if [ $GITHUB_BRANCH == "" ]; then
-    $GITHUB_BRANCH="master"
+  if [ "${GITHUB_BRANCH}" == "" ]; then
+    let GITHUB_BRANCH="master"
   fi
 }
 
@@ -56,7 +56,7 @@ function checks()
 
   if [[ $EUID -ne 0 ]]; then
      echo -e "${RED}$0 must be run as root.${NC}"
-     #exit 1
+     exit 1
   fi
 }
 
@@ -96,7 +96,7 @@ rpcuser=$RPCUSER
 rpcpassword=$RPCPASSWORD
 daemon=1
 server=1
-#listen=1
+listen=1
 dynode=1
 EOF
 }
@@ -114,10 +114,10 @@ function create_swap()
 function clone_github()
 {
   echo
-  echo -e "${BLUE}Cloning GitHUB${NC}"
+  echo -e "${BLUE}Cloning Github Repo ${NC}"
   cd /root/
   git clone -b $GITHUB_BRANCH $GITHUB_REPO $PROJECT_FOLDER 
-  sleep 10
+  sleep 30
   if [ $? -eq 0 ]; then
     echo -e "${BLUE}Github repo cloned - Proceeding to next step. ${NC}"
     echo
@@ -131,20 +131,48 @@ function clone_github()
 function install_prerequisites()
 {
   echo
-  echo -e "${BLUE}Installing Pre-requisites${NC}"
-  sudo apt-get install -y pkg-config
+  echo -e "${BLUE}Installing $PROJECT Dependencies${NC}"
+  echo
   sudo apt-get install -y build-essential libtool autotools-dev autoconf automake pkg-config libssl-dev libboost-all-dev libprotobuf-dev protobuf-compiler libcrypto++-dev libevent-dev
   sudo add-apt-repository ppa:bitcoin/bitcoin -y
-  sudo apt-get update
+  sudo apt-get update -y
   sudo apt-get upgrade -y
   sudo apt-get install -y libdb4.8-dev libdb4.8++-dev
+}
+
+function restart_node()
+{
+  echo
+  echo -e "${BLUE}Restarting $PROJECT${NC}"
+  echo
+  $CLI_BINARY stop
+  sleep 10
+  $DAEMON_START
+}
+
+function wait_until_active()
+{
+  echo
+  echo -e "${BLUE}Waiting for $PROJECT to activate${NC}"
+  echo -e "Press [CTRL+C] to stop.."
+  echo
+  for (( ; ; )) do
+    if [[ ($(${CLI_BINARY} ${DYNODE_STATUS_COMMAND}) == *999*) ]]; then
+      restart_node
+      sleep 30
+      ${CLI_BINARY} ${NODE_INFO_COMMAND} #return getinfo
+      echo -e "${RED}---===>>> Blockchain and Dynode data fully synced. <<<===---${NC}"
+      exit 1
+    fi
+    sleep 30 # check status every 30 seconds
+  done
 }
 
 function build_project()
 {
   cd $PROJECT_FOLDER
   echo
-  echo -e "${BLUE}Compiling the wallet (this can take 20 minutes)${NC}"
+  echo -e "${BLUE}Compiling the wallet (this can take 20-30 minutes)${NC}"
   ./autogen.sh
   ./configure --without-gui --disable-tests
   make
@@ -171,7 +199,8 @@ function configure_firewall()
   sudo ufw default deny incoming
   sudo ufw allow ssh/tcp
   sudo ufw limit ssh/tcp
-  sudo ufw allow $MN_PORT/tcp
+  sudo ufw allow $P2P_PORT/tcp
+  sudo ufw allow $RPC_PORT/tcp
   sudo ufw logging on
 }
 
@@ -188,33 +217,18 @@ function start_wallet()
     $DAEMON_START
     echo
     echo -e "${BLUE}Congratulations, you've installed your $PROJECT!${NC}"
-    echo -e "${YELLOW}On your Windows/Mac wallet:${NC}"
-    echo -e "${BLUE}Please go to your Dynodes tab, click on your dynode and press on ${YELLOW}Start Alias${NC}"
     echo
     echo -e "${RED}---===>>> NEXT STEPS <<<===---${NC}"
-    echo -e "${BLUE}Wait 10-20 minutes for the dynode to announce itself then:${NC}"
-    echo -e "${BLUE}type this in the VPC:${NC}"
-    echo -e "${GREEN}~/dynamic/src/dynamic-cli stop${NC}"
-    echo -e "${GREEN}~/dynamic/src/dynamicd -daemon${NC}"
-    echo -e "${BLUE}(or simply reboot your server)${NC}"
-    echo -e "${BLUE}Your wallet timer on your Windows/Mac wallet will start counting up shortly after${NC}"
-    echo -e "${BLUE}and rewards will resume after maturity.${NC}"
     echo
-    echo -e "${YELLOW}OR${NC}"
-    echo
-    echo -e "${BLUE}Would you like me to wait 15 minutes and do this for you?${NC}"
+    echo -e "${BLUE}Would you like me to wait until the $PROJECT is fully synced?${NC}"
     read -e -p "$(echo -e ${YELLOW}[Y/N] ${NC})" CHOICE
     if [[ ("$CHOICE" == "n" || "$CHOICE" == "N") ]]; then
+      echo -e "${BLUE}End of Install.${NC}"
       exit 1
     fi
-    echo -e "${BLUE}Waiting 15 minutes...${NC}"
-    echo
-    sleep 900
-    echo -e "${BLUE}Restarting Dynode...${NC}"
-    $CLI_BINARY stop
-    $DAEMON_START
-    echo -e "${BLUE}Your wallet should update in a few minutes.${NC}"
-    $CLI_BINARY dynode status
+    wait_until_active
+    echo -e "${YELLOW}On your Desktop (Windows/MAC/Linux) Qt wallet:${NC}"
+    echo -e "${BLUE}Please go to your Dynodes tab, click on your dynode and press on ${YELLOW}Start Alias${NC}"
     echo -e "${BLUE}End of Install.${NC}"
   else
     RETVAL=$?

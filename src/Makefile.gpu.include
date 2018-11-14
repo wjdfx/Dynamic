@@ -96,7 +96,7 @@ crypto_argon2gpu_opencl_libdynamic_gpu_opencl_a_SOURCES = \
 	third_party/CL/opencl.h \
 	third_party/CL/cl_gl.h \
 	third_party/CL/cl_gl_ext.h \
-	third_party/CL/cl_ext.h"
+	third_party/CL/cl_ext.h
 
 nodist_crypto_argon2gpu_opencl_libdynamic_gpu_opencl_a_SOURCES = $(GENERATED_KERNEL_FILES)
 

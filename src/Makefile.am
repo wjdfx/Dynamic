@@ -10,6 +10,7 @@ DYNAMIC_INCLUDES=-I$(builddir) -I$(builddir)/obj $(BOOST_CPPFLAGS) $(LEVELDB_CPP
 
 DYNAMIC_INCLUDES += -I$(srcdir)/secp256k1/include
 DYNAMIC_INCLUDES += -I$(srcdir)/univalue/include
+DYNAMIC_INCLUDES += -I$(srcdir)/third_party/CL
 
 LIBDYNAMIC_SERVER=libdynamic_server.a
 LIBDYNAMIC_WALLET=libdynamic_wallet.a

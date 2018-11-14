@@ -35,10 +35,10 @@
 extern "C" {
 #endif
 
-#include <CL/cl.h>
-#include <CL/cl_gl.h>
-#include <CL/cl_gl_ext.h>
-#include <CL/cl_ext.h>
+#include "third_party/CL/cl.h"
+#include "third_party/CL/cl_gl.h"
+#include "third_party/CL/cl_gl_ext.h"
+#include "third_party/CL/cl_ext.h"
 
 #ifdef __cplusplus
 }

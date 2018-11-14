@@ -23,10 +23,8 @@
 #define CL_USE_DEPRECATED_OPENCL_1_2_APIS
 #if defined(__APPLE__) || defined(__MACOSX)
 #include <OpenCL/cl.h>
-#elseif
-#include "third_party/CL/cl.h"
 #else
-#include <CL/cl.h>
+#include "third_party/CL/cl.h"
 #endif
 #undef CL_VERSION_2_0
 

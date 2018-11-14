@@ -92,7 +92,8 @@ crypto_argon2gpu_opencl_libdynamic_gpu_opencl_a_SOURCES = \
 	crypto/argon2gpu/opencl/program-context.cpp \
 	third_party/CL/cl.h \
 	third_party/CL/cl_platform.h \
-	third_party/CL/cl_version.h
+	third_party/CL/cl_version.h \
+	third_party/CL/opencl.h
 
 nodist_crypto_argon2gpu_opencl_libdynamic_gpu_opencl_a_SOURCES = $(GENERATED_KERNEL_FILES)
 

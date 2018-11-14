@@ -22,7 +22,6 @@ EXTRA_LIBRARIES += $(LIBDYNAMIC_GPU_CUDA)
 LIBDYNAMIC_GPU_LDADD_EXTRA += $(LIBDYNAMIC_GPU_CUDA)
 LIBDYNAMIC_GPU_LDADD_EXTRA += $(CUDA_LDLIBS)
 DYNAMIC_INCLUDES += $(CUDA_CFLAGS)
-DYNAMIC_INCLUDES += -I$(srcdir)/third_party/CL
 
 NVCCFLAGS += -arch=sm_30 -w -lineinfo -Xcompiler='--std=c++11 $(CFLAGS)'
 
@@ -57,6 +56,7 @@ crypto/argon2gpu/cuda/kernels.o: crypto/argon2gpu/cuda/kernels.cu.o
 	$(NVCC) $(nvcc_FLAGS) -dlink -o $@ $<
 
 else
+DYNAMIC_INCLUDES += -I$(srcdir)/third_party/CL
 LIBDYNAMIC_GPU_OPENCL = crypto/argon2gpu/opencl/libdynamic_gpu_opencl.a
 EXTRA_LIBRARIES += $(LIBDYNAMIC_GPU_OPENCL)
 

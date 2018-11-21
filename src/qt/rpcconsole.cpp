@@ -4,6 +4,10 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#if defined(HAVE_CONFIG_H)
+#include "config/dynamic-config.h"
+#endif
+
 #include "rpcconsole.h"
 #include "ui_rpcconsole.h"
 
@@ -29,6 +33,7 @@
 #include <QDir>
 #include <QKeyEvent>
 #include <QMenu>
+#include <QMessageBox>
 #include <QScrollBar>
 #include <QSettings>
 #include <QSignalMapper>
@@ -68,6 +73,20 @@ const struct {
     {"cmd-error", ":/icons/tx_output"},
     {"misc", ":/icons/tx_inout"},
     {NULL, NULL}};
+
+namespace {
+
+// don't add private key handling cmd's to the history
+const QStringList historyFilter = QStringList()
+    << "importprivkey"
+    << "importmulti"
+    << "signmessagewithprivkey"
+    << "signrawtransaction"
+    << "walletpassphrase"
+    << "walletpassphrasechange"
+    << "encryptwallet";
+
+}
 
 /* Object for executing console RPC commands in a separate thread.
 */
@@ -134,13 +153,16 @@ public:
  * @param[in]    strCommand  Command line to split
  */
 
-bool RPCConsole::RPCExecuteCommandLine(std::string& strResult, const std::string& strCommand)
+bool RPCConsole::RPCParseCommandLine(std::string &strResult, const std::string &strCommand, const bool fExecute, std::string * const pstrFilteredOut)
 {
-    std::vector<std::vector<std::string> > stack;
+    std::vector< std::vector<std::string> > stack;
     stack.push_back(std::vector<std::string>());
 
-    enum CmdParseState {
+    enum CmdParseState
+    {
         STATE_EATING_SPACES,
+        STATE_EATING_SPACES_IN_ARG,
+        STATE_EATING_SPACES_IN_BRACKETS,
         STATE_ARGUMENT,
         STATE_SINGLEQUOTED,
         STATE_DOUBLEQUOTED,
@@ -151,173 +173,215 @@ bool RPCConsole::RPCExecuteCommandLine(std::string& strResult, const std::string
     } state = STATE_EATING_SPACES;
     std::string curarg;
     UniValue lastResult;
+    unsigned nDepthInsideSensitive = 0;
+    size_t filter_begin_pos = 0, chpos;
+    std::vector<std::pair<size_t, size_t>> filter_ranges;
+
+    auto add_to_current_stack = [&](const std::string& strArg) {
+        if (stack.back().empty() && (!nDepthInsideSensitive) && historyFilter.contains(QString::fromStdString(strArg), Qt::CaseInsensitive)) {
+            nDepthInsideSensitive = 1;
+            filter_begin_pos = chpos;
+        }
+        // Make sure stack is not empty before adding something
+        if (stack.empty()) {
+            stack.push_back(std::vector<std::string>());
+        }
+        stack.back().push_back(strArg);
+    };
+
+    auto close_out_params = [&]() {
+        if (nDepthInsideSensitive) {
+            if (!--nDepthInsideSensitive) {
+                assert(filter_begin_pos);
+                filter_ranges.push_back(std::make_pair(filter_begin_pos, chpos));
+                filter_begin_pos = 0;
+            }
+        }
+        stack.pop_back();
+    };
 
     std::string strCommandTerminated = strCommand;
     if (strCommandTerminated.back() != '\n')
         strCommandTerminated += "\n";
-    for (char ch : strCommandTerminated) {
-        switch (state) {
-        case STATE_COMMAND_EXECUTED_INNER:
-        case STATE_COMMAND_EXECUTED: {
-            bool breakParsing = true;
-            switch (ch) {
-            case '[':
-                curarg.clear();
-                state = STATE_COMMAND_EXECUTED_INNER;
-                break;
-            default:
-                if (state == STATE_COMMAND_EXECUTED_INNER) {
-                    if (ch != ']') {
-                        // append char to the current argument (which is also used for the query command)
-                        curarg += ch;
-                        break;
-                    }
-                    if (curarg.size()) {
-                        // if we have a value query, query arrays with index and objects with a string key
-                        UniValue subelement;
-                        if (lastResult.isArray()) {
-                            for (char argch : curarg)
-                                if (!std::isdigit(argch))
-                                    throw std::runtime_error("Invalid result query");
-                            subelement = lastResult[atoi(curarg.c_str())];
-                        } else if (lastResult.isObject())
-                            subelement = find_value(lastResult, curarg);
+    for (chpos = 0; chpos < strCommandTerminated.size(); ++chpos)
+    {
+        char ch = strCommandTerminated[chpos];
+        switch(state)
+        {
+            case STATE_COMMAND_EXECUTED_INNER:
+            case STATE_COMMAND_EXECUTED:
+            {
+                bool breakParsing = true;
+                switch(ch)
+                {
+                    case '[': curarg.clear(); state = STATE_COMMAND_EXECUTED_INNER; break;
+                    default:
+                        if (state == STATE_COMMAND_EXECUTED_INNER)
+                        {
+                            if (ch != ']')
+                            {
+                                // append char to the current argument (which is also used for the query command)
+                                curarg += ch;
+                                break;
+                            }
+                            if (curarg.size() && fExecute)
+                            {
+                                // if we have a value query, query arrays with index and objects with a string key
+                                UniValue subelement;
+                                if (lastResult.isArray())
+                                {
+                                    for(char argch: curarg)
+                                        if (!std::isdigit(argch))
+                                            throw std::runtime_error("Invalid result query");
+                                    subelement = lastResult[atoi(curarg.c_str())];
+                                }
+                                else if (lastResult.isObject())
+                                    subelement = find_value(lastResult, curarg);
+                                else
+                                    throw std::runtime_error("Invalid result query"); //no array or object: abort
+                                lastResult = subelement;
+                            }
+
+                            state = STATE_COMMAND_EXECUTED;
+                            break;
+                        }
+                        // don't break parsing when the char is required for the next argument
+                        breakParsing = false;
+
+                        // pop the stack and return the result to the current command arguments
+                        close_out_params();
+
+                        // don't stringify the json in case of a string to avoid doublequotes
+                        if (lastResult.isStr())
+                            curarg = lastResult.get_str();
                         else
-                            throw std::runtime_error("Invalid result query"); //no array or object: abort
-                        lastResult = subelement;
-                    }
+                            curarg = lastResult.write(2);
 
-                    state = STATE_COMMAND_EXECUTED;
+                        // if we have a non empty result, use it as stack argument otherwise as general result
+                        if (curarg.size())
+                        {
+                            if (stack.size())
+                                add_to_current_stack(curarg);
+                            else
+                                strResult = curarg;
+                        }
+                        curarg.clear();
+                        // assume eating space state
+                        state = STATE_EATING_SPACES;
+                }
+                if (breakParsing)
                     break;
-                }
-                // don't break parsing when the char is required for the next argument
-                breakParsing = false;
-
-                // pop the stack and return the result to the current command arguments
-                stack.pop_back();
-
-                // don't stringify the json in case of a string to avoid doublequotes
-                if (lastResult.isStr())
-                    curarg = lastResult.get_str();
-                else
-                    curarg = lastResult.write(2);
-
-                // if we have a non empty result, use it as stack argument otherwise as general result
-                if (curarg.size()) {
-                    if (stack.size())
-                        stack.back().push_back(curarg);
-                    else
-                        strResult = curarg;
-                }
-                curarg.clear();
-                // assume eating space state
-                state = STATE_EATING_SPACES;
             }
-            if (breakParsing)
-                break;
-        }
-        case STATE_ARGUMENT:      // In or after argument
-        case STATE_EATING_SPACES: // Handle runs of whitespace
-            switch (ch) {
-            case '"':
-                state = STATE_DOUBLEQUOTED;
-                break;
-            case '\'':
-                state = STATE_SINGLEQUOTED;
-                break;
+            case STATE_ARGUMENT: // In or after argument
+            case STATE_EATING_SPACES_IN_ARG:
+            case STATE_EATING_SPACES_IN_BRACKETS:
+            case STATE_EATING_SPACES: // Handle runs of whitespace
+                switch(ch)
+            {
+                case '"': state = STATE_DOUBLEQUOTED; break;
+                case '\'': state = STATE_SINGLEQUOTED; break;
+                case '\\': state = STATE_ESCAPE_OUTER; break;
+                case '(': case ')': case '\n':
+                    if (state == STATE_EATING_SPACES_IN_ARG)
+                        throw std::runtime_error("Invalid Syntax");
+                    if (state == STATE_ARGUMENT)
+                    {
+                        if (ch == '(' && stack.size() && stack.back().size() > 0)
+                        {
+                            if (nDepthInsideSensitive) {
+                                ++nDepthInsideSensitive;
+                            }
+                            stack.push_back(std::vector<std::string>());
+                        }
 
-            case '\\':
-                state = STATE_ESCAPE_OUTER;
-                break;
-            case '(':
-            case ')':
-            case '\n':
-                if (state == STATE_ARGUMENT) {
-                    if (ch == '(' && stack.size() && stack.back().size() > 0)
-                        stack.push_back(std::vector<std::string>());
-                    if (curarg.size()) {
                         // don't allow commands after executed commands on baselevel
                         if (!stack.size())
                             throw std::runtime_error("Invalid Syntax");
-                        stack.back().push_back(curarg);
-                    }
-                    curarg.clear();
-                    state = STATE_EATING_SPACES;
-                }
-                if ((ch == ')' || ch == '\n') && stack.size() > 0) {
-                    std::string strPrint;
-                    // Convert argument list to JSON objects in method-dependent way,
-                    // and pass it along with the method name to the dispatcher.
-                    JSONRPCRequest req;
-                    req.params = RPCConvertValues(stack.back()[0], std::vector<std::string>(stack.back().begin() + 1, stack.back().end()));
-                    req.strMethod = stack.back()[0];
-                    lastResult = tableRPC.execute(req);
 
-                    state = STATE_COMMAND_EXECUTED;
-                    curarg.clear();
-                }
-                break;
-            case ' ':
-            case ',':
-            case '\t':
-                if (state == STATE_ARGUMENT) // Space ends argument
-                {
-                    if (curarg.size())
-                        stack.back().push_back(curarg);
-                    curarg.clear();
-                }
-                state = STATE_EATING_SPACES;
-                break;
-            default:
-                curarg += ch;
-                state = STATE_ARGUMENT;
+                        add_to_current_stack(curarg);
+                        curarg.clear();
+                        state = STATE_EATING_SPACES_IN_BRACKETS;
+                    }
+                    if ((ch == ')' || ch == '\n') && stack.size() > 0)
+                    {
+                        if (fExecute) {
+                            // Convert argument list to JSON objects in method-dependent way,
+                            // and pass it along with the method name to the dispatcher.
+                            JSONRPCRequest req;
+                            req.params = RPCConvertValues(stack.back()[0], std::vector<std::string>(stack.back().begin() + 1, stack.back().end()));
+                            req.strMethod = stack.back()[0];
+                            lastResult = tableRPC.execute(req);
+                        }
+
+                        state = STATE_COMMAND_EXECUTED;
+                        curarg.clear();
+                    }
+                    break;
+                case ' ': case ',': case '\t':
+                    if(state == STATE_EATING_SPACES_IN_ARG && curarg.empty() && ch == ',')
+                        throw std::runtime_error("Invalid Syntax");
+
+                    else if(state == STATE_ARGUMENT) // Space ends argument
+                    {
+                        add_to_current_stack(curarg);
+                        curarg.clear();
+                    }
+                    if ((state == STATE_EATING_SPACES_IN_BRACKETS || state == STATE_ARGUMENT) && ch == ',')
+                    {
+                        state = STATE_EATING_SPACES_IN_ARG;
+                        break;
+                    }
+                    state = STATE_EATING_SPACES;
+                    break;
+                default: curarg += ch; state = STATE_ARGUMENT;
             }
-            break;
-        case STATE_SINGLEQUOTED: // Single-quoted string
-            switch (ch) {
-            case '\'':
-                state = STATE_ARGUMENT;
                 break;
-            default:
-                curarg += ch;
+            case STATE_SINGLEQUOTED: // Single-quoted string
+                switch(ch)
+            {
+                case '\'': state = STATE_ARGUMENT; break;
+                default: curarg += ch;
             }
-            break;
-        case STATE_DOUBLEQUOTED: // Double-quoted string
-            switch (ch) {
-            case '"':
-                state = STATE_ARGUMENT;
                 break;
-            case '\\':
-                state = STATE_ESCAPE_DOUBLEQUOTED;
-                break;
-            default:
-                curarg += ch;
+            case STATE_DOUBLEQUOTED: // Double-quoted string
+                switch(ch)
+            {
+                case '"': state = STATE_ARGUMENT; break;
+                case '\\': state = STATE_ESCAPE_DOUBLEQUOTED; break;
+                default: curarg += ch;
             }
-            break;
-        case STATE_ESCAPE_OUTER: // '\' outside quotes
-            curarg += ch;
-            state = STATE_ARGUMENT;
-            break;
-        case STATE_ESCAPE_DOUBLEQUOTED: // '\' in double-quoted text
-            if (ch != '"' && ch != '\\')
-                curarg += '\\'; // keep '\' for everything but the quote and '\' itself
-            curarg += ch;
-            state = STATE_DOUBLEQUOTED;
-            break;
+                break;
+            case STATE_ESCAPE_OUTER: // '\' outside quotes
+                curarg += ch; state = STATE_ARGUMENT;
+                break;
+            case STATE_ESCAPE_DOUBLEQUOTED: // '\' in double-quoted text
+                if(ch != '"' && ch != '\\') curarg += '\\'; // keep '\' for everything but the quote and '\' itself
+                curarg += ch; state = STATE_DOUBLEQUOTED;
+                break;
         }
     }
-    switch (state) // final state
+    if (pstrFilteredOut) {
+        if (STATE_COMMAND_EXECUTED == state) {
+            assert(!stack.empty());
+            close_out_params();
+        }
+        *pstrFilteredOut = strCommand;
+        for (auto i = filter_ranges.rbegin(); i != filter_ranges.rend(); ++i) {
+            pstrFilteredOut->replace(i->first, i->second - i->first, "(…)");
+        }
+    }
+    switch(state) // final state
     {
-    case STATE_COMMAND_EXECUTED:
-        if (lastResult.isStr())
-            strResult = lastResult.get_str();
-        else
-            strResult = lastResult.write(2);
-    case STATE_ARGUMENT:
-    case STATE_EATING_SPACES:
-        return true;
-    default: // ERROR to end in one of the other states
-        return false;
+        case STATE_COMMAND_EXECUTED:
+            if (lastResult.isStr())
+                strResult = lastResult.get_str();
+            else
+                strResult = lastResult.write(2);
+        case STATE_ARGUMENT:
+        case STATE_EATING_SPACES:
+            return true;
+        default: // ERROR to end in one of the other states
+            return false;
     }
 }
 
@@ -835,20 +899,40 @@ void RPCConsole::setDynodeCount(const QString& strDynodes)
 void RPCConsole::on_lineEdit_returnPressed()
 {
     QString cmd = ui->lineEdit->text();
-    ui->lineEdit->clear();
 
-    if (!cmd.isEmpty()) {
+    if(!cmd.isEmpty())
+    {
+        std::string strFilteredCmd;
+        try {
+            std::string dummy;
+            if (!RPCParseCommandLine(dummy, cmd.toStdString(), false, &strFilteredCmd)) {
+                // Failed to parse command, so we cannot even filter it for the history
+                throw std::runtime_error("Invalid command line");
+            }
+        } catch (const std::exception& e) {
+            QMessageBox::critical(this, "Error", QString("Error: ") + QString::fromStdString(e.what()));
+            return;
+        }
+
+        ui->lineEdit->clear();
+
+        cmdBeforeBrowsing = QString();
+
         message(CMD_REQUEST, cmd);
         Q_EMIT cmdRequest(cmd);
+
+        cmd = QString::fromStdString(strFilteredCmd);
+
         // Remove command, if already in history
         history.removeOne(cmd);
         // Append command to history
         history.append(cmd);
         // Enforce maximum history size
-        while (history.size() > CONSOLE_HISTORY)
+        while(history.size() > CONSOLE_HISTORY)
             history.removeFirst();
         // Set pointer to end of history
         historyPtr = history.size();
+
         // Scroll console view to end
         scrollToEnd();
     }
@@ -856,14 +940,22 @@ void RPCConsole::on_lineEdit_returnPressed()
 
 void RPCConsole::browseHistory(int offset)
 {
+    // store current text when start browsing through the history
+    if (historyPtr == history.size()) {
+        cmdBeforeBrowsing = ui->lineEdit->text();
+    }
+
     historyPtr += offset;
-    if (historyPtr < 0)
+    if(historyPtr < 0)
         historyPtr = 0;
-    if (historyPtr > history.size())
+    if(historyPtr > history.size())
         historyPtr = history.size();
     QString cmd;
-    if (historyPtr < history.size())
+    if(historyPtr < history.size())
         cmd = history.at(historyPtr);
+    else if (!cmdBeforeBrowsing.isNull()) {
+        cmd = cmdBeforeBrowsing;
+    }
     ui->lineEdit->setText(cmd);
 }
 
